@@ -10,6 +10,13 @@ A comprehensive Python tool to detect hardware accelerators on Linux systems and
 - **Cross-Platform**: Works on any Linux system
 - **Flexible Testing**: Run full scans, CPU benchmarks, or GPU acceleration tests
 
+## Requirements
+
+- **Python 3.7 or higher**
+- Linux operating system
+- (Optional) GPU with CUDA, ROCm, or OpenCL support
+- (Optional) NumPy, Pandas, CuPy, or PyOpenCL for benchmarks
+
 ## Quick Start
 
 ### Option 1: Using the setup script (recommended)

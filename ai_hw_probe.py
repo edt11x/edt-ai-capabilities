@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 
 class HardwareDetector:
@@ -40,7 +40,7 @@ class HardwareDetector:
         except Exception:
             return False
 
-    def _run_command(self, cmd: List[str]) -> tuple[int, str]:
+    def _run_command(self, cmd: List[str]) -> Tuple[int, str]:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             return result.returncode, result.stdout
@@ -610,7 +610,7 @@ class BenchmarkRunner:
 
         return results
 
-    def _benchmark_matrix_multiply(self) -> tuple[float, float]:
+    def _benchmark_matrix_multiply(self) -> Tuple[float, float]:
         import numpy as np
 
         size = 1000
@@ -626,7 +626,7 @@ class BenchmarkRunner:
         ops_per_sec = (2 * size**3 * 5) / runtime
         return runtime, ops_per_sec
 
-    def _benchmark_elementwise_ops(self) -> tuple[float, float]:
+    def _benchmark_elementwise_ops(self) -> Tuple[float, float]:
         import numpy as np
 
         size = 1_000_000
@@ -642,7 +642,7 @@ class BenchmarkRunner:
         ops_per_sec = (4 * size * 10) / runtime
         return runtime, ops_per_sec
 
-    def _benchmark_linear_algebra(self) -> tuple[float, float]:
+    def _benchmark_linear_algebra(self) -> Tuple[float, float]:
         import numpy as np
 
         size = 500
@@ -656,7 +656,7 @@ class BenchmarkRunner:
         runtime = end - start
         return runtime, 0
 
-    def _benchmark_fft(self) -> tuple[float, float]:
+    def _benchmark_fft(self) -> Tuple[float, float]:
         import numpy as np
         import math
 
@@ -723,7 +723,7 @@ class BenchmarkRunner:
 
         return results
 
-    def _benchmark_dataframe_creation(self) -> tuple[float, float]:
+    def _benchmark_dataframe_creation(self) -> Tuple[float, float]:
         import numpy as np
         import pandas as pd
 
@@ -740,7 +740,7 @@ class BenchmarkRunner:
         ops_per_sec = (rows * 10 * 5) / runtime
         return runtime, ops_per_sec
 
-    def _benchmark_dataframe_filter(self) -> tuple[float, float]:
+    def _benchmark_dataframe_filter(self) -> Tuple[float, float]:
         import numpy as np
         import pandas as pd
 
@@ -758,7 +758,7 @@ class BenchmarkRunner:
         ops_per_sec = (rows * 10) / runtime
         return runtime, ops_per_sec
 
-    def _benchmark_dataframe_groupby(self) -> tuple[float, float]:
+    def _benchmark_dataframe_groupby(self) -> Tuple[float, float]:
         import numpy as np
         import pandas as pd
 
@@ -779,7 +779,7 @@ class BenchmarkRunner:
         ops_per_sec = (rows * 10) / runtime
         return runtime, ops_per_sec
 
-    def _benchmark_dataframe_merge(self) -> tuple[float, float]:
+    def _benchmark_dataframe_merge(self) -> Tuple[float, float]:
         import numpy as np
         import pandas as pd
 
@@ -887,7 +887,7 @@ class BenchmarkRunner:
 
         return results
 
-    def _benchmark_cupy_matrix_multiply(self) -> tuple[float, float]:
+    def _benchmark_cupy_matrix_multiply(self) -> Tuple[float, float]:
         import cupy as cp
 
         size = 1000
@@ -905,7 +905,7 @@ class BenchmarkRunner:
         ops_per_sec = (2 * size**3 * 5) / runtime
         return runtime, ops_per_sec
 
-    def _benchmark_cupy_elementwise_ops(self) -> tuple[float, float]:
+    def _benchmark_cupy_elementwise_ops(self) -> Tuple[float, float]:
         import cupy as cp
 
         size = 1_000_000
@@ -1007,7 +1007,7 @@ class BenchmarkRunner:
 
         return results
 
-    def _benchmark_cupy_matrix_multiply(self) -> tuple[float, float]:
+    def _benchmark_cupy_matrix_multiply(self) -> Tuple[float, float]:
         import cupy as cp
 
         size = 1000
@@ -1025,7 +1025,7 @@ class BenchmarkRunner:
         ops_per_sec = (2 * size**3 * 5) / runtime
         return runtime, ops_per_sec
 
-    def _benchmark_cupy_elementwise_ops(self) -> tuple[float, float]:
+    def _benchmark_cupy_elementwise_ops(self) -> Tuple[float, float]:
         import cupy as cp
 
         size = 1_000_000
