@@ -598,6 +598,37 @@ class HardwareDetector:
             "opencl_platforms": [],
             "vulkan_available": False,
             "opengl_version": None,
+            "rendering_backend": None,
+            "vendor_info": {},
+            "is_software_rendering": False,
+        }
+
+        vendor_id_map = {
+            "0x1af4": {
+                "name": "Virtio",
+                "driver": "virtio-gpu",
+                "description": "Virtio GPU (VM paravirtualized)",
+            },
+            "0x15ad": {
+                "name": "VMware",
+                "driver": "vmwgfx",
+                "description": "VMware SVGA GPU (VM virtualized)",
+            },
+            "0x8086": {
+                "name": "Intel",
+                "driver": "i915 / Xe",
+                "description": "Intel Graphics (integrated/dedicated)",
+            },
+            "0x1002": {
+                "name": "AMD",
+                "driver": "amdgpu",
+                "description": "AMD Radeon Graphics",
+            },
+            "0x10de": {
+                "name": "NVIDIA",
+                "driver": "nvidia/nouveau",
+                "description": "NVIDIA Graphics (CUDA uses /dev/nvidia*, Vulkan via nvk/mesa)",
+            },
         }
 
         dri_path = "/dev/dri"
@@ -609,6 +640,18 @@ class HardwareDetector:
                     if dev.startswith("renderD"):
                         results["render_devices"].append(dev_path)
                         cap_info = self._get_device_capabilities(dev_path)
+
+                        pci_id = cap_info.get("pci_id", "")
+                        if pci_id:
+                            vendor_hex = pci_id.split(":")[0].strip()
+                            if vendor_hex in vendor_id_map:
+                                vendor_info = vendor_id_map[vendor_hex]
+                                results["vendor_info"][dev] = vendor_info
+                                cap_info["vendor_name"] = vendor_info["name"]
+                                cap_info["vendor_description"] = vendor_info[
+                                    "description"
+                                ]
+
                         results["device_capabilities"][dev] = cap_info
                     elif dev.startswith("card"):
                         results["dri_cards"].append(dev_path)
@@ -635,6 +678,23 @@ class HardwareDetector:
                 version_match = re.search(r"OpenGL version string:\s*(.+)", output)
                 if version_match:
                     results["opengl_version"] = version_match.group(1)
+
+                renderer_match = re.search(r"OpenGL renderer string:\s*(.+)", output)
+                if renderer_match:
+                    renderer = renderer_match.group(1)
+                    results["rendering_backend"] = renderer
+
+                    if "llvmpipe" in renderer.lower():
+                        results["is_software_rendering"] = True
+
+                vendor_match = re.search(r"OpenGL vendor string:\s*(.+)", output)
+                if vendor_match:
+                    results["vendor_info"]["glx_vendor"] = vendor_match.group(1)
+
+        if self._command_available("glxinfo"):
+            code, output = self._run_command(["glxinfo", "-B"])
+            if code == 0 and "llvmpipe" in output.lower():
+                results["is_software_rendering"] = True
 
         return results
 
@@ -2064,6 +2124,14 @@ def format_for_students(detector: HardwareDetector) -> str:
         output.append("-" * 60)
         output.append("GPU DEVICE DETAILS")
         output.append("-" * 60)
+
+        if gpu_details["is_software_rendering"]:
+            output.append("WARNING: Software rendering detected!")
+            output.append("  You are using CPU-only rendering (llvmpipe)")
+            output.append("  No hardware acceleration available")
+            output.append("  This explains slow graphics/AI performance")
+            output.append("")
+
         if gpu_details["render_devices"]:
             output.append(
                 f"Found {len(gpu_details['render_devices'])} render device(s):"
@@ -2072,17 +2140,48 @@ def format_for_students(detector: HardwareDetector) -> str:
                 caps = gpu_details["device_capabilities"].get(dev, {})
                 driver = caps.get("driver", "unknown")
                 pci_id = caps.get("pci_id", "")
+                vendor_name = caps.get("vendor_name", "unknown")
+                vendor_desc = caps.get("vendor_description", "")
+
                 output.append(f"  {dev}")
+                if vendor_name != "unknown":
+                    output.append(f"    Vendor: {vendor_name}")
+                if vendor_desc:
+                    output.append(f"    Description: {vendor_desc}")
                 if driver:
                     output.append(f"    Driver: {driver}")
                 if pci_id:
                     output.append(f"    PCI ID: {pci_id}")
             output.append("")
+
+            if gpu_details["vendor_info"]:
+                output.append("Vendor ID Reference:")
+                for key, value in gpu_details["vendor_info"].items():
+                    if key != "glx_vendor":
+                        pci_id_part = (
+                            key.split(":")[0]
+                            if ":" in str(value.get("pci_id", ""))
+                            else ""
+                        )
+                        output.append(
+                            f"  {pci_id_part if pci_id_part else 'Unknown'}: {value.get('description', 'Unknown')}"
+                        )
+                output.append("")
+
             output.append("What this means:")
             output.append("  - renderD128 is a GPU device for compute/rendering")
             output.append("  - Can be used with OpenCL, Vulkan, OpenGL")
             output.append("  - May be a virtualized GPU (virtio-gpu) if in VM")
             output.append("")
+
+            if gpu_details["rendering_backend"]:
+                output.append(f"  OpenGL renderer: {gpu_details['rendering_backend']}")
+                if "llvmpipe" in gpu_details["rendering_backend"].lower():
+                    output.append(
+                        "    (CPU software rendering - no hardware acceleration)"
+                    )
+                output.append("")
+
             if gpu_details["vulkan_available"]:
                 output.append(
                     "  Vulkan support available - High-performance graphics API"
@@ -2090,6 +2189,17 @@ def format_for_students(detector: HardwareDetector) -> str:
             if gpu_details["opengl_version"]:
                 output.append(f"  OpenGL version: {gpu_details['opengl_version']}")
             output.append("")
+
+            if any(
+                "virtio" in str(v).lower() for v in gpu_details["vendor_info"].values()
+            ):
+                output.append("  Virtio GPU notes:")
+                output.append("    - Full CUDA/ROCm may not work in VM")
+                output.append("    - Use OpenCL for basic GPU acceleration")
+                output.append(
+                    "    - Limited compute capabilities compared to bare metal"
+                )
+                output.append("")
         if gpu_details["dri_cards"]:
             output.append(f"Found {len(gpu_details['dri_cards'])} display device(s):")
             for dev in gpu_details["dri_cards"][:3]:
@@ -2177,8 +2287,6 @@ def format_for_students(detector: HardwareDetector) -> str:
             for cmd in usage_examples["test_commands"][:5]:
                 output.append(cmd)
             output.append("")
-    opencl_info = detector.detect_opencl()
-
     opencl_info = detector.detect_opencl()
     output.append("-" * 60)
     output.append("OPENCL (GENERAL ACCELERATION)")
