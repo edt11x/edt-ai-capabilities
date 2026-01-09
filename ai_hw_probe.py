@@ -589,6 +589,163 @@ class HardwareDetector:
 
         return results
 
+    def detect_required_software(
+        self, gpu_info: Dict[str, Any], npu_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        results: Dict[str, Any] = {
+            "gpu_software": [],
+            "npu_software": [],
+            "drivers": [],
+            "python_packages": [],
+        }
+
+        if gpu_info["present"]:
+            has_nvidia = False
+            has_amd = False
+            has_intel = False
+            has_vivante = False
+            has_opencl = False
+
+            for mm in gpu_info.get("make_model", []):
+                if re.search(r"NVIDIA|GeForce|Quadro|Tesla", mm, re.IGNORECASE):
+                    has_nvidia = True
+                elif re.search(r"AMD|Radeon|FirePro", mm, re.IGNORECASE):
+                    has_amd = True
+                elif re.search(r"Intel.*Graphics|Arc", mm, re.IGNORECASE):
+                    has_intel = True
+                elif re.search(r"Vivante|galcore|etnaviv", mm, re.IGNORECASE):
+                    has_vivante = True
+
+            if gpu_info["libraries"]:
+                has_opencl = True
+
+            if has_nvidia:
+                results["drivers"].extend(
+                    [
+                        "NVIDIA proprietary driver (nvidia-driver)",
+                        "NVIDIA CUDA Toolkit (cuda-toolkit)",
+                    ]
+                )
+                results["gpu_software"].extend(
+                    [
+                        "PyTorch with CUDA support: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118",
+                        "TensorFlow GPU: pip install tensorflow[and-cuda]",
+                        "CuPy (GPU NumPy): pip install cupy-cuda11x or cupy-cuda12x",
+                    ]
+                )
+
+            if has_amd:
+                results["drivers"].extend(
+                    [
+                        "AMDGPU driver (for modern AMD GPUs)",
+                        "ROCm software stack (for compute support)",
+                    ]
+                )
+                results["gpu_software"].extend(
+                    [
+                        "PyTorch with ROCm: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm5.7",
+                        "TensorFlow ROCm: pip install tensorflow-rocm",
+                    ]
+                )
+
+            if has_intel:
+                results["drivers"].extend(
+                    [
+                        "Intel GPU drivers (i915 for integrated, iris for Arc)",
+                    ]
+                )
+                results["gpu_software"].extend(
+                    [
+                        "Intel Extension for PyTorch: pip install intel_extension_for_pytorch",
+                        "oneAPI Base Toolkit (from Intel)",
+                    ]
+                )
+
+            if has_vivante:
+                results["drivers"].extend(
+                    [
+                        "Galcore driver for Vivante GPUs",
+                        "Etnaviv open-source driver (for older Vivante GPUs)",
+                    ]
+                )
+
+            if has_opencl or has_vivante:
+                results["gpu_software"].append("PyOpenCL: pip install pyopencl")
+
+        if npu_info["present"]:
+            has_ethos = False
+            has_vsi = False
+            has_coral = False
+            has_nvdla = False
+
+            for mm in npu_info.get("make_model", []):
+                if re.search(r"Ethos|Arm.*NPU", mm, re.IGNORECASE):
+                    has_ethos = True
+                elif re.search(r"VSI|OpenVX", mm, re.IGNORECASE):
+                    has_vsi = True
+                elif re.search(r"Coral|TPU|Google.*Edge", mm, re.IGNORECASE):
+                    has_coral = True
+                elif re.search(r"NVDLA|NVIDIA.*DLA", mm, re.IGNORECASE):
+                    has_nvdla = True
+
+            for module in npu_info["modules"]:
+                if "ethos" in module.lower():
+                    has_ethos = True
+                elif "vsi" in module.lower():
+                    has_vsi = True
+                elif "nvdla" in module.lower():
+                    has_nvdla = True
+
+            if has_ethos:
+                results["drivers"].append("Arm Ethos-U NPU kernel driver")
+                results["npu_software"].extend(
+                    [
+                        "TensorFlow Lite with NPU delegate",
+                        "Arm Ethos-U NPU software stack",
+                        "Vela compiler for Ethos-U",
+                    ]
+                )
+
+            if has_vsi:
+                results["drivers"].append("VeriSilicon/VSI NPU driver")
+                results["npu_software"].extend(
+                    [
+                        "VeriSilicon OpenVX runtime",
+                        "NPU acceleration libraries from your device vendor",
+                    ]
+                )
+
+            if has_coral:
+                results["drivers"].append("libedgetpu (Google Edge TPU driver)")
+                results["npu_software"].extend(
+                    [
+                        "PyCoral: pip install pycoral",
+                        "TensorFlow Lite for Edge TPU",
+                    ]
+                )
+
+            if has_nvdla:
+                results["drivers"].append("NVIDIA NVDLA kernel driver")
+                results["npu_software"].extend(
+                    [
+                        "NVIDIA NVDLA runtime libraries",
+                        "TensorRT for NVDLA (if supported)",
+                    ]
+                )
+
+        if gpu_info["present"] or npu_info["present"]:
+            results["python_packages"].extend(
+                [
+                    "OpenCL support: pip install pyopencl",
+                    "CUDA/ROCm packages (choose based on your GPU):",
+                    "  - For NVIDIA: cupy, torch[cuda], tensorflow[and-cuda]",
+                    "  - For AMD: torch[rocm], tensorflow-rocm",
+                    "  - For Intel: intel_extension_for_pytorch",
+                ]
+            )
+
+        return results
+
     def detect_virtualization(self) -> Dict[str, Any]:
         results: Dict[str, Any] = {
             "in_vm": False,
@@ -1502,6 +1659,47 @@ def format_for_students(detector: HardwareDetector) -> str:
         output.append("NO dedicated AI accelerator detected")
         output.append("AI tasks will use your CPU and/or GPU")
     output.append("")
+
+    software_info = detector.detect_required_software(gpu_info, npu_info)
+    if software_info["gpu_software"] or software_info["npu_software"]:
+        output.append("-" * 60)
+        output.append("SOFTWARE SETUP FOR ACCELERATORS")
+        output.append("-" * 60)
+        output.append("To use your GPU/NPU with Python, you'll need:")
+        output.append("")
+
+        if software_info["drivers"]:
+            output.append("1. SYSTEM DRIVERS (install with package manager):")
+            for driver in software_info["drivers"][:5]:
+                output.append(f"   - {driver}")
+            output.append("")
+
+        if software_info["gpu_software"]:
+            output.append("2. GPU PYTHON LIBRARIES:")
+            for pkg in software_info["gpu_software"][:5]:
+                output.append(f"   - {pkg}")
+            output.append("")
+
+        if software_info["npu_software"]:
+            output.append("3. NPU PYTHON LIBRARIES:")
+            for pkg in software_info["npu_software"][:5]:
+                output.append(f"   - {pkg}")
+            output.append("")
+
+        output.append("Quick start (pick your GPU type):")
+        output.append(
+            "  NVIDIA:  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118"
+        )
+        output.append(
+            "  AMD:     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm5.7"
+        )
+        output.append("  Intel:   pip install intel_extension_for_pytorch")
+        output.append("  Generic: pip install pyopencl")
+        output.append("")
+        output.append("Note: Install drivers first, then Python libraries!")
+        output.append("")
+
+    opencl_info = detector.detect_opencl()
 
     opencl_info = detector.detect_opencl()
     output.append("-" * 60)
