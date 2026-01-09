@@ -589,6 +589,219 @@ class HardwareDetector:
 
         return results
 
+    def detect_virtualization(self) -> Dict[str, Any]:
+        results: Dict[str, Any] = {
+            "in_vm": False,
+            "in_container": False,
+            "vm_type": None,
+            "container_type": None,
+            "vt_x": False,
+            "vt_d": False,
+            "iommu": False,
+            "iommu_passthrough": False,
+            "sr_iov": False,
+            "amd_v": False,
+            "amd_vi": False,
+            "sev": False,
+            "sev_es": False,
+            "details": [],
+        }
+
+        dmi_product = self._read_file("/sys/class/dmi/id/product_name")
+        dmi_sys_vendor = self._read_file("/sys/class/dmi/id/sys_vendor")
+        cpuinfo = self._read_file("/proc/cpuinfo")
+        cmdline = self._read_file("/proc/cmdline")
+        cgroup = self._read_file("/proc/1/cgroup")
+
+        cpu_flags = ""
+        if cpuinfo:
+            flags_match = re.search(r"flags\s*:\s*(.+)", cpuinfo, re.IGNORECASE)
+            if flags_match:
+                cpu_flags = flags_match.group(1)
+
+        vm_indicators = [
+            "vmware",
+            "virtualbox",
+            "kvm",
+            "qemu",
+            "xen",
+            "hyper-v",
+            "bochs",
+            "parallels",
+        ]
+
+        if dmi_product:
+            for vm in vm_indicators:
+                if re.search(vm, dmi_product, re.IGNORECASE):
+                    results["in_vm"] = True
+                    results["vm_type"] = vm
+                    results["details"].append(
+                        f"VM detected in DMI product: {dmi_product}"
+                    )
+                    break
+
+        if not results["in_vm"] and dmi_sys_vendor:
+            for vm in vm_indicators:
+                if re.search(vm, dmi_sys_vendor, re.IGNORECASE):
+                    results["in_vm"] = True
+                    results["vm_type"] = vm
+                    results["details"].append(
+                        f"VM detected in DMI vendor: {dmi_sys_vendor}"
+                    )
+                    break
+
+        if self.dmesg and not results["in_vm"]:
+            if re.search(r"hypervisor", self.dmesg, re.IGNORECASE) is not None:
+                results["in_vm"] = True
+                results["details"].append("Hypervisor detected in dmesg")
+
+        if self._command_available("systemd-detect-virt"):
+            code, output = self._run_command(["systemd-detect-virt"])
+            if code == 0 and output.strip() and output.strip() != "none":
+                results["in_vm"] = True
+                if not results["vm_type"]:
+                    results["vm_type"] = output.strip()
+                results["details"].append(f"systemd-detect-virt: {output.strip()}")
+
+        if cpu_flags:
+            if "vmx" in cpu_flags:
+                results["vt_x"] = True
+                results["details"].append("Intel VT-x (CPU virtualization) supported")
+
+            if "svm" in cpu_flags:
+                results["amd_v"] = True
+                results["details"].append("AMD-V (CPU virtualization) supported")
+
+            if "dmar" in cpu_flags:
+                results["vt_d"] = True
+                results["details"].append("Intel VT-d (IOMMU) supported")
+
+        if self.dmesg:
+            if (
+                re.search(r"DMAR|IOMMU enabled|AMD-Vi", self.dmesg, re.IGNORECASE)
+                is not None
+            ):
+                results["iommu"] = True
+                results["details"].append("IOMMU detected in dmesg")
+
+            if (
+                re.search(r"passthrough|DMA remapping", self.dmesg, re.IGNORECASE)
+                is not None
+            ):
+                results["iommu_passthrough"] = True
+                results["details"].append("IOMMU passthrough detected")
+
+            if (
+                re.search(
+                    r"SR-IOV|Single Root I/O Virtualization", self.dmesg, re.IGNORECASE
+                )
+                is not None
+            ):
+                results["sr_iov"] = True
+                results["details"].append("SR-IOV capability detected")
+
+            if re.search(r"AMD-Vi", self.dmesg, re.IGNORECASE) is not None:
+                results["amd_vi"] = True
+                results["details"].append("AMD-Vi (IOMMU) detected")
+
+            if re.search(r"SEV: Enabled", self.dmesg, re.IGNORECASE) is not None:
+                results["sev"] = True
+                results["details"].append(
+                    "AMD SEV (Secure Encrypted Virtualization) detected"
+                )
+
+            if re.search(r"SEV-ES: Enabled", self.dmesg, re.IGNORECASE) is not None:
+                results["sev_es"] = True
+                results["details"].append("AMD SEV-ES (Encrypted State) detected")
+
+        iommu_path = "/sys/kernel/iommu_groups"
+        if self._file_exists(iommu_path):
+            try:
+                iommu_groups = list(Path(iommu_path).iterdir())
+                if len(iommu_groups) > 0:
+                    results["iommu"] = True
+                    results["details"].append(
+                        f"IOMMU groups found: {len(iommu_groups)}"
+                    )
+            except Exception:
+                pass
+
+        if cmdline:
+            if (
+                re.search(
+                    r"iommu=pt|iommu=on|intel_iommu=on|amd_iommu=on",
+                    cmdline,
+                    re.IGNORECASE,
+                )
+                is not None
+            ):
+                results["iommu"] = True
+                results["details"].append("IOMMU enabled in kernel cmdline")
+
+            if re.search(r"iommu=pt", cmdline, re.IGNORECASE) is not None:
+                results["iommu_passthrough"] = True
+                results["details"].append("IOMMU passthrough mode in kernel cmdline")
+
+            if (
+                re.search(r"maxvfs=|pci=pcie_bus_peer2peer", cmdline, re.IGNORECASE)
+                is not None
+            ):
+                results["sr_iov"] = True
+                results["details"].append("SR-IOV parameters in kernel cmdline")
+
+        if self._command_available("lspci"):
+            code, output = self._run_command(["lspci", "-nn", "-v"])
+            if code == 0:
+                if (
+                    re.search(r"Single Root I/O Virtualization", output, re.IGNORECASE)
+                    is not None
+                ):
+                    results["sr_iov"] = True
+                    results["details"].append("SR-IOV capable device detected")
+
+                if (
+                    re.search(r"Access Control Services", output, re.IGNORECASE)
+                    is not None
+                ):
+                    results["details"].append("ACS (Access Control Services) detected")
+
+                if re.search(r"PASID|PRI|ATS", output, re.IGNORECASE) is not None:
+                    results["details"].append("PCIe virtualization features detected")
+
+        if self._file_exists("/.dockerenv"):
+            results["in_container"] = True
+            results["container_type"] = "Docker"
+            results["details"].append("Docker container detected (.dockerenv)")
+
+        if cgroup:
+            if (
+                re.search(r"docker|containerd|kubepods", cgroup, re.IGNORECASE)
+                is not None
+            ):
+                results["in_container"] = True
+                if not results["container_type"]:
+                    results["container_type"] = "Docker/Container"
+                results["details"].append("Container detected in cgroup")
+
+            if re.search(r"kubepods", cgroup, re.IGNORECASE) is not None:
+                results["container_type"] = "Kubernetes"
+                results["details"].append("Kubernetes container detected")
+
+            if re.search(r"lxc|lxd", cgroup, re.IGNORECASE) is not None:
+                if not results["container_type"]:
+                    results["container_type"] = "LXC/LXD"
+                results["details"].append("LXC/LXD container detected")
+
+        if self._command_available("virt-what"):
+            code, output = self._run_command(["virt-what"])
+            if code == 0 and output.strip():
+                results["in_vm"] = True
+                if not results["vm_type"]:
+                    results["vm_type"] = output.strip()
+                results["details"].append(f"virt-what: {output.strip()}")
+
+        return results
+
 
 class BenchmarkRunner:
     def __init__(self):
@@ -1425,6 +1638,75 @@ def format_for_students(detector: HardwareDetector) -> str:
                 output.append(f"  {detail}")
         output.append("")
 
+    virt_info = detector.detect_virtualization()
+    has_virt_info = any(
+        [
+            virt_info["in_vm"],
+            virt_info["in_container"],
+            virt_info["vt_x"],
+            virt_info["vt_d"],
+            virt_info["iommu"],
+            virt_info["sr_iov"],
+        ]
+    )
+    if has_virt_info:
+        output.append("-" * 60)
+        output.append("VIRTUALIZATION & CONTAINERS")
+        output.append("-" * 60)
+        if virt_info["in_vm"]:
+            vm_type = f" ({virt_info['vm_type']})" if virt_info["vm_type"] else ""
+            output.append(f"Running in a Virtual Machine{vm_type}")
+            output.append("  This system is a VM, not bare metal hardware")
+            output.append("  Performance may be affected by virtualization overhead")
+            output.append("")
+        if virt_info["in_container"]:
+            container_type = (
+                f" ({virt_info['container_type']})"
+                if virt_info["container_type"]
+                else ""
+            )
+            output.append(f"Running in a Container{container_type}")
+            output.append("  This system is running in a containerized environment")
+            output.append("  Hardware access may be limited by container isolation")
+            output.append("")
+        if virt_info["vt_x"] or virt_info["amd_v"]:
+            cpu_virt = "Intel VT-x" if virt_info["vt_x"] else "AMD-V"
+            output.append(f"{cpu_virt} (CPU Virtualization) - Supported")
+            output.append("  This CPU can run virtual machines efficiently")
+            output.append("")
+        if virt_info["vt_d"] or virt_info["amd_vi"] or virt_info["iommu"]:
+            iommu_type = []
+            if virt_info["vt_d"]:
+                iommu_type.append("Intel VT-d")
+            if virt_info["amd_vi"]:
+                iommu_type.append("AMD-Vi")
+            if not iommu_type:
+                iommu_type.append("IOMMU")
+            output.append(f"{', '.join(iommu_type)} (I/O Memory Management) - Detected")
+            if virt_info["iommu_passthrough"]:
+                output.append(
+                    "  Passthrough mode: Devices can be passed directly to VMs"
+                )
+            else:
+                output.append("  Hardware can securely assign devices to VMs")
+            output.append("")
+        if virt_info["sr_iov"]:
+            output.append("SR-IOV (Single Root I/O Virtualization) - Available")
+            output.append("  Network/storage devices can be shared across multiple VMs")
+            output.append("  Each VM gets its own dedicated hardware function")
+            output.append("")
+        if virt_info["sev"]:
+            output.append("AMD SEV (Secure Encrypted Virtualization) - Detected")
+            output.append("  VM memory is encrypted for better security")
+            if virt_info["sev_es"]:
+                output.append("  CPU state is also encrypted (SEV-ES)")
+            output.append("")
+        if virt_info["details"]:
+            output.append("Additional details:")
+            for detail in virt_info["details"][:5]:
+                output.append(f"  {detail}")
+        output.append("")
+
     output.append("=" * 60)
     output.append("SUMMARY")
     output.append("=" * 60)
@@ -1458,6 +1740,14 @@ def format_for_students(detector: HardwareDetector) -> str:
         accelerators.append("Video Acceleration")
     if compress_info["hardware"]:
         accelerators.append("Compression Acceleration")
+    if virt_info["vt_x"] or virt_info["amd_v"]:
+        accelerators.append("CPU Virtualization (VT-x/AMD-V)")
+    if virt_info["iommu"]:
+        accelerators.append("IOMMU (VT-d/AMD-Vi)")
+    if virt_info["sr_iov"]:
+        accelerators.append("SR-IOV")
+    if virt_info["sev"] or virt_info["sev_es"]:
+        accelerators.append("Encrypted Virtualization (SEV)")
 
     if accelerators:
         output.append("Your system has these acceleration features:")
