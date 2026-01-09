@@ -333,6 +333,48 @@ class HardwareDetector:
 
         return make_models
 
+    def detect_memory(self) -> Dict[str, Any]:
+        results: Dict[str, Any] = {
+            "total_gb": 0,
+            "available_gb": 0,
+            "used_gb": 0,
+            "swap_gb": 0,
+            "details": [],
+        }
+
+        meminfo = self._read_file("/proc/meminfo")
+        if meminfo:
+            mem_total = 0
+            mem_available = 0
+            swap_total = 0
+
+            for line in meminfo.split("\n"):
+                if line.startswith("MemTotal:"):
+                    mem_total = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    mem_available = int(line.split()[1])
+                elif line.startswith("SwapTotal:"):
+                    swap_total = int(line.split()[1])
+
+            if mem_total > 0:
+                results["total_gb"] = mem_total / (1024 * 1024)
+            if mem_available > 0:
+                results["available_gb"] = mem_available / (1024 * 1024)
+                results["used_gb"] = results["total_gb"] - results["available_gb"]
+            if swap_total > 0:
+                results["swap_gb"] = swap_total / (1024 * 1024)
+
+            if results["total_gb"] > 0:
+                results["details"].append(f"Total RAM: {results['total_gb']:.2f} GB")
+                results["details"].append(
+                    f"Available: {results['available_gb']:.2f} GB"
+                )
+                results["details"].append(f"Used: {results['used_gb']:.2f} GB")
+                if results["swap_gb"] > 0:
+                    results["details"].append(f"Swap: {results['swap_gb']:.2f} GB")
+
+        return results
+
     def detect_cpu_features(self) -> Dict[str, Any]:
         results: Dict[str, Any] = {"flags": [], "vector_extensions": []}
 
@@ -2087,6 +2129,55 @@ def format_for_students(detector: HardwareDetector) -> str:
         output.append("Your CPU has these special instructions for faster math:")
         for ext in cpu_features["vector_extensions"]:
             output.append(f"  {ext}")
+        output.append("")
+
+    memory_info = detector.detect_memory()
+    if memory_info["total_gb"] > 0:
+        output.append("-" * 60)
+        output.append("MEMORY (RAM)")
+        output.append("-" * 60)
+        output.append(f"Total RAM: {memory_info['total_gb']:.1f} GB")
+        output.append(f"Available: {memory_info['available_gb']:.1f} GB")
+        output.append(f"Used: {memory_info['used_gb']:.1f} GB")
+        if memory_info["swap_gb"] > 0:
+            output.append(f"Swap space: {memory_info['swap_gb']:.1f} GB")
+        output.append("")
+        output.append("What this means:")
+
+        if memory_info["total_gb"] < 8:
+            output.append("  - Basic system with limited memory")
+            output.append("  - Good for web browsing, documents, light coding")
+            output.append("  - Heavy programs (AI, video editing) may be slow")
+        elif memory_info["total_gb"] < 16:
+            output.append("  - Average system with decent memory")
+            output.append("  - Good for most daily tasks, coding, light AI")
+            output.append("  - Can handle moderate data processing")
+        elif memory_info["total_gb"] < 32:
+            output.append("  - Good system with plenty of memory")
+            output.append("  - Great for coding, AI, data analysis")
+            output.append("  - Can run multiple programs at once")
+        else:
+            output.append("  - High-end system with lots of memory")
+            output.append("  - Excellent for AI, scientific computing")
+            output.append("  - Can handle large datasets and complex tasks")
+
+        output.append("")
+        output.append("Think of RAM like a desk workspace:")
+        output.append(f"  - Your desk is {memory_info['total_gb']:.1f} GB wide")
+        output.append(
+            f"  - You have {memory_info['available_gb']:.1f} GB free space right now"
+        )
+        output.append("  - More RAM = more room to spread out your work")
+        output.append("  - When RAM fills up, the computer gets slow")
+
+        if memory_info["swap_gb"] > 0:
+            output.append("")
+            output.append(
+                f"  - Swap is like a backup closet ({memory_info['swap_gb']:.1f} GB)"
+            )
+            output.append("  - When the desk fills, items go to swap")
+            output.append("  - Accessing swap is slower than RAM")
+
         output.append("")
 
     gpu_info = detector.detect_gpu()
