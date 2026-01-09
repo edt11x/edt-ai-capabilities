@@ -84,6 +84,7 @@ class HardwareDetector:
             "modules": [],
             "libraries": [],
             "details": [],
+            "make_model": [],
         }
 
         gpu_keywords = [
@@ -156,6 +157,9 @@ class HardwareDetector:
                 except Exception:
                     pass
 
+        if results["present"]:
+            results["make_model"] = self._extract_make_model("gpu", results)
+
         return results
 
     def detect_npu(self) -> Dict[str, Any]:
@@ -165,6 +169,7 @@ class HardwareDetector:
             "modules": [],
             "libraries": [],
             "details": [],
+            "make_model": [],
         }
 
         npu_keywords = ["npu", "ethos", "vsi", "tpu", "neural", "nvdla", "openvit"]
@@ -198,6 +203,9 @@ class HardwareDetector:
                     if re.search(keyword, output, re.IGNORECASE) is not None:
                         results["present"] = True
                         results["modules"].append(keyword)
+
+        if results["present"]:
+            results["make_model"] = self._extract_make_model("npu", results)
 
         return results
 
@@ -260,6 +268,70 @@ class HardwareDetector:
                 ):
                     devices.append(line.strip())
         return devices
+
+    def _extract_make_model(
+        self, device_type: str, results: Dict[str, Any]
+    ) -> List[str]:
+        make_models: List[str] = []
+
+        if device_type == "gpu":
+            pci_devices = self.detect_pci_devices()
+            for device in pci_devices:
+                if re.search(
+                    r"NVIDIA|AMD|Intel.*Graphics|Radeon|GeForce|Quadro|Tesla|FirePro",
+                    device,
+                    re.IGNORECASE,
+                ):
+                    make_models.append(device)
+
+            drm_devices = self.detect_drm_devices()
+            for dev in drm_devices:
+                if "uevent" in dev:
+                    uevent_content = dev["uevent"]
+                    if re.search(r"NVIDIA|AMD|INTEL", uevent_content, re.IGNORECASE):
+                        if "DRIVER" in uevent_content:
+                            driver_match = re.search(r"DRIVER=([^\s]+)", uevent_content)
+                            if driver_match:
+                                make_models.append(f"Driver: {driver_match.group(1)}")
+                        if "PCI_ID" in uevent_content:
+                            pci_match = re.search(r"PCI_ID=([^\s]+)", uevent_content)
+                            if pci_match:
+                                make_models.append(f"PCI ID: {pci_match.group(1)}")
+
+            if results["modules"]:
+                for module in results["modules"]:
+                    module_info = {
+                        "etnaviv": "Vivante GPU (etnaviv driver)",
+                        "galcore": "Vivante GC GPU (galcore driver)",
+                        "vsi": "Vivante/OpenVX GPU",
+                        "imx_gpu": "NXP i.MX GPU",
+                    }
+                    if module in module_info:
+                        make_models.append(module_info[module])
+                    else:
+                        make_models.append(f"{module} GPU module")
+
+        elif device_type == "npu":
+            if results["modules"]:
+                module_info = {
+                    "ethos": "Arm Ethos NPU",
+                    "vsi": "VeriSilicon/OpenVX NPU",
+                    "tpu": "Tensor Processing Unit (TPU)",
+                    "nvdla": "NVIDIA Deep Learning Accelerator (NVDLA)",
+                    "openvit": "OpenVIT NPU",
+                }
+                for module in results["modules"]:
+                    if module in module_info:
+                        make_models.append(module_info[module])
+                    else:
+                        make_models.append(f"{module} NPU module")
+
+            usb_devices = self.detect_usb_devices()
+            for device in usb_devices:
+                if re.search(r"Coral|TPU|Google|GlobalUnichip", device, re.IGNORECASE):
+                    make_models.append(device)
+
+        return make_models
 
     def detect_cpu_features(self) -> Dict[str, Any]:
         results: Dict[str, Any] = {"flags": [], "vector_extensions": []}
@@ -1169,6 +1241,11 @@ def format_for_students(detector: HardwareDetector) -> str:
     if gpu_info["present"]:
         output.append("YES - A graphics accelerator was detected!")
         output.append("")
+        if gpu_info.get("make_model"):
+            output.append("Hardware identified:")
+            for mm in gpu_info["make_model"][:3]:
+                output.append(f"  → {mm}")
+            output.append("")
         output.append("What this means:")
         output.append("  - Faster graphics and games")
         output.append("  - Can help with video processing")
@@ -1194,6 +1271,11 @@ def format_for_students(detector: HardwareDetector) -> str:
     if npu_info["present"]:
         output.append("YES - An AI accelerator was detected!")
         output.append("")
+        if npu_info.get("make_model"):
+            output.append("Hardware identified:")
+            for mm in npu_info["make_model"][:3]:
+                output.append(f"  → {mm}")
+            output.append("")
         output.append("What this means:")
         output.append("  - Faster AI and machine learning tasks")
         output.append("  - Better performance for neural networks")
@@ -1382,6 +1464,19 @@ def format_for_students(detector: HardwareDetector) -> str:
         for acc in accelerators:
             output.append(f"  {acc}")
         output.append("")
+
+        if gpu_info.get("make_model"):
+            output.append("GPU details:")
+            for mm in gpu_info["make_model"][:2]:
+                output.append(f"  {mm}")
+            output.append("")
+
+        if npu_info.get("make_model"):
+            output.append("NPU details:")
+            for mm in npu_info["make_model"][:2]:
+                output.append(f"  {mm}")
+            output.append("")
+
         output.append("This means some programs will run faster than on a basic")
         output.append("computer without these features.")
     else:
