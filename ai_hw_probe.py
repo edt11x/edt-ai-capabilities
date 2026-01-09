@@ -589,6 +589,309 @@ class HardwareDetector:
 
         return results
 
+    def detect_gpu_device_details(self) -> Dict[str, Any]:
+        results: Dict[str, Any] = {
+            "render_devices": [],
+            "drm_devices": [],
+            "dri_cards": [],
+            "device_capabilities": {},
+            "opencl_platforms": [],
+            "vulkan_available": False,
+            "opengl_version": None,
+        }
+
+        dri_path = "/dev/dri"
+        if self._file_exists(dri_path):
+            try:
+                devices = os.listdir(dri_path)
+                for dev in devices:
+                    dev_path = os.path.join(dri_path, dev)
+                    if dev.startswith("renderD"):
+                        results["render_devices"].append(dev_path)
+                        cap_info = self._get_device_capabilities(dev_path)
+                        results["device_capabilities"][dev] = cap_info
+                    elif dev.startswith("card"):
+                        results["dri_cards"].append(dev_path)
+
+                card_path = "/sys/class/drm"
+                for card in Path(card_path).glob("card*"):
+                    if card.is_dir():
+                        results["drm_devices"].append(str(card))
+
+            except Exception:
+                pass
+
+        if self._command_available("vulkaninfo"):
+            code, output = self._run_command(["vulkaninfo", "--summary"])
+            if code == 0:
+                results["vulkan_available"] = True
+                version_match = re.search(r"Vulkan Version:\s*([0-9.]+)", output)
+                if version_match:
+                    results["opengl_version"] = version_match.group(1)
+
+        if self._command_available("glxinfo"):
+            code, output = self._run_command(["glxinfo"])
+            if code == 0:
+                version_match = re.search(r"OpenGL version string:\s*(.+)", output)
+                if version_match:
+                    results["opengl_version"] = version_match.group(1)
+
+        return results
+
+    def _get_device_capabilities(self, device_path: str) -> Dict[str, Any]:
+        caps: Dict[str, Any] = {
+            "vendor": None,
+            "device": None,
+            "driver": None,
+            "compute_units": None,
+            "max_freq": None,
+            "memory_size": None,
+        }
+
+        try:
+            stat_info = os.stat(device_path)
+            major = os.major(stat_info.st_rdev)
+            minor = os.minor(stat_info.st_rdev)
+
+            uevent_path = f"/sys/dev/char/{major}:{minor}/uevent"
+            uevent = self._read_file(uevent_path)
+            if uevent:
+                for line in uevent.split("\n"):
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        if key in ["DRIVER", "PCI_ID", "PCI_SUBSYS_ID"]:
+                            caps[key.lower()] = value
+
+        except Exception:
+            pass
+
+        return caps
+
+    def detect_virtio_components(self, in_vm: bool) -> Dict[str, Any]:
+        results: Dict[str, Any] = {
+            "in_vm": in_vm,
+            "components": {},
+            "details": [],
+        }
+
+        if not in_vm:
+            return results
+
+        virtio_components = {
+            "virtio-blk": "Virtio Block Storage (fast disk I/O)",
+            "virtio-net": "Virtio Network (fast network I/O)",
+            "virtio-gpu": "Virtio GPU (virtualized graphics)",
+            "virtio-balloon": "Virtio Balloon (memory management)",
+            "virtio-console": "Virtio Console (VM communication)",
+            "virtio-rng": "Virtio RNG (random number generation)",
+            "virtio-serial": "Virtio Serial (VM communication)",
+            "virtio-scsi": "Virtio SCSI (storage)",
+            "virtio-9p": "Virtio 9P (file sharing)",
+            "virtio-fs": "Virtio FS (fast file sharing)",
+        }
+
+        if self._command_available("lspci"):
+            code, output = self._run_command(["lspci", "-nn", "-v"])
+            if code == 0:
+                for virtio, desc in virtio_components.items():
+                    if re.search(virtio, output, re.IGNORECASE) is not None:
+                        results["components"][virtio] = desc
+                        results["details"].append(f"{virtio}: {desc}")
+
+        virtio_path = "/sys/devices/virtual"
+        if self._file_exists(virtio_path):
+            try:
+                for item in Path(virtio_path).iterdir():
+                    if "virtio" in item.name.lower():
+                        comp_name = item.name
+                        if comp_name in virtio_components:
+                            results["components"][comp_name] = virtio_components[
+                                comp_name
+                            ]
+                        results["details"].append(f"Found: {comp_name}")
+            except Exception:
+                pass
+
+        if self._command_available("lsmod"):
+            code, output = self._run_command(["lsmod"])
+            if code == 0:
+                for virtio, desc in virtio_components.items():
+                    module = virtio.replace("-", "_")
+                    if re.search(module, output, re.IGNORECASE) is not None:
+                        if virtio not in results["components"]:
+                            results["components"][virtio] = desc
+                            results["details"].append(f"{virtio}: {desc}")
+
+        if self.dmesg:
+            if re.search(r"virtio", self.dmesg, re.IGNORECASE) is not None:
+                virtio_matches = re.findall(
+                    r"virtio[_-][a-z0-9]+", self.dmesg, re.IGNORECASE
+                )
+                for match in virtio_matches:
+                    match_clean = match.replace("_", "-")
+                    if match_clean in virtio_components:
+                        if match_clean not in results["components"]:
+                            results["components"][match_clean] = virtio_components[
+                                match_clean
+                            ]
+                            results["details"].append(
+                                f"{match_clean}: detected in dmesg"
+                            )
+
+        return results
+
+    def detect_vfio(self) -> Dict[str, Any]:
+        results: Dict[str, Any] = {
+            "available": False,
+            "modules_loaded": [],
+            "vfio_devices": [],
+            "iommu_groups": [],
+            "iommu_devices": {},
+            "platform_devices": [],
+            "mdev_devices": [],
+            "devices_bound_to_vfio": [],
+            "details": [],
+        }
+
+        vfio_modules = [
+            "vfio",
+            "vfio_pci",
+            "vfio_iommu_type1",
+            "vfio_iommu_type2",
+            "vfio_virqfd",
+            "vfio_mdev",
+            "vfio_fsl_mc",
+        ]
+
+        if self._command_available("lsmod"):
+            code, output = self._run_command(["lsmod"])
+            if code == 0:
+                for module in vfio_modules:
+                    if re.search(module, output, re.IGNORECASE) is not None:
+                        results["available"] = True
+                        results["modules_loaded"].append(module)
+
+        vfio_path = "/dev/vfio"
+        if self._file_exists(vfio_path):
+            try:
+                devices = os.listdir(vfio_path)
+                for dev in devices:
+                    if re.match(r"^[0-9]+$", dev):
+                        results["vfio_devices"].append(f"/dev/vfio/{dev}")
+                if results["vfio_devices"]:
+                    results["available"] = True
+                    results["details"].append(
+                        f"Found {len(results['vfio_devices'])} VFIO device(s)"
+                    )
+            except Exception:
+                pass
+
+        iommu_group_path = "/sys/kernel/iommu_groups"
+        if self._file_exists(iommu_group_path):
+            try:
+                groups = list(Path(iommu_group_path).iterdir())
+                for group in groups:
+                    if group.is_dir() and group.name.isdigit():
+                        group_num = int(group.name)
+                        group_devices = []
+                        try:
+                            devices = (group / "devices").iterdir()
+                            for dev in devices:
+                                if dev.is_dir():
+                                    group_devices.append(dev.name)
+                                    results["iommu_devices"][group_num] = group_devices
+                        except Exception:
+                            pass
+                        if group_devices:
+                            results["iommu_groups"].append(group_num)
+
+                if results["iommu_groups"]:
+                    results["details"].append(
+                        f"Found {len(results['iommu_groups'])} IOMMU group(s)"
+                    )
+            except Exception:
+                pass
+
+        pci_devices_path = "/sys/bus/pci/devices"
+        if self._file_exists(pci_devices_path):
+            try:
+                for device in Path(pci_devices_path).iterdir():
+                    if device.is_dir():
+                        driver_path = device / "driver"
+                        if driver_path.exists():
+                            try:
+                                driver_name = driver_path.resolve().name
+                                if "vfio" in driver_name.lower():
+                                    results["available"] = True
+                                    results["devices_bound_to_vfio"].append(device.name)
+                                    results["details"].append(
+                                        f"Device bound to VFIO: {device.name}"
+                                    )
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+        vfio_platform_path = "/sys/bus/platform/devices"
+        if self._file_exists(vfio_platform_path):
+            try:
+                for device in Path(vfio_platform_path).iterdir():
+                    if device.is_dir() and "vfio" in device.name.lower():
+                        results["available"] = True
+                        results["platform_devices"].append(device.name)
+                        results["details"].append(
+                            f"VFIO platform device: {device.name}"
+                        )
+            except Exception:
+                pass
+
+        mdev_path = "/sys/bus/mdev/devices"
+        if self._file_exists(mdev_path):
+            try:
+                for device in Path(mdev_path).iterdir():
+                    if device.is_dir():
+                        results["available"] = True
+                        results["mdev_devices"].append(device.name)
+                        results["details"].append(
+                            f"VFIO mediated device: {device.name}"
+                        )
+            except Exception:
+                pass
+
+        if self.dmesg:
+            if (
+                re.search(
+                    r"vfio-pci.*bound|vfio_iommu|iommu.*vfio", self.dmesg, re.IGNORECASE
+                )
+                is not None
+            ):
+                results["available"] = True
+                results["details"].append("VFIO activity detected in dmesg")
+
+            vfio_bind_matches = re.findall(
+                r"vfio-pci.*bound to ([0-9a-fA-F:\.]+)", self.dmesg
+            )
+            for pci_addr in vfio_bind_matches:
+                if pci_addr not in results["devices_bound_to_vfio"]:
+                    results["devices_bound_to_vfio"].append(pci_addr)
+                    results["details"].append(f"Device bound to VFIO: {pci_addr}")
+
+        if self._command_available("lspci"):
+            code, output = self._run_command(["lspci", "-nn", "-k"])
+            if code == 0:
+                for line in output.split("\n"):
+                    if "Kernel driver in use" in line and "vfio" in line.lower():
+                        pci_addr_match = re.search(r"^([0-9a-fA-F:\.]+):", line)
+                        if pci_addr_match:
+                            pci_addr = pci_addr_match.group(1)
+                            if pci_addr not in results["devices_bound_to_vfio"]:
+                                results["devices_bound_to_vfio"].append(pci_addr)
+                                results["details"].append(
+                                    f"Device using VFIO: {pci_addr}"
+                                )
+
+        return results
+
     def detect_required_software(
         self, gpu_info: Dict[str, Any], npu_info: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -743,6 +1046,128 @@ class HardwareDetector:
                     "  - For Intel: intel_extension_for_pytorch",
                 ]
             )
+
+        return results
+
+    def get_practical_usage_examples(
+        self,
+        gpu_info: Dict[str, Any],
+        npu_info: Dict[str, Any],
+        gpu_details: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        results: Dict[str, Any] = {
+            "examples": [],
+            "test_commands": [],
+            "verification": [],
+        }
+
+        if gpu_info["present"] and gpu_details["render_devices"]:
+            render_dev = gpu_details["render_devices"][0]
+            driver = (
+                gpu_details["device_capabilities"]
+                .get(render_dev, {})
+                .get("driver", "unknown")
+            )
+
+            results["examples"].append("Python GPU Access Examples:")
+            results["examples"].append("")
+
+            if gpu_details["vulkan_available"]:
+                results["examples"].append("1. Vulkan-based GPU compute:")
+                results["examples"].append("   from vulkan import *")
+                results["examples"].append("   instance = vkCreateInstance(...)")
+                results["examples"].append(
+                    "   # Can use for compute shaders and graphics"
+                )
+                results["examples"].append("")
+
+            results["examples"].append(
+                "2. OpenCL (works with most GPUs including virtio-gpu):"
+            )
+            results["examples"].append("   import pyopencl as cl")
+            results["examples"].append("   platforms = cl.get_platforms()")
+            results["examples"].append("   devices = platforms[0].get_devices()")
+            results["examples"].append("   ctx = cl.Context([devices[0]])")
+            results["examples"].append("   queue = cl.CommandQueue(ctx)")
+            results["examples"].append("   # Use for GPU-accelerated computations")
+            results["examples"].append("")
+
+            results["examples"].append(
+                "3. Direct device access (limited, mainly for rendering):"
+            )
+            results["examples"].append("   import pyglet")
+            results["examples"].append("   window = pyglet.Window()")
+            results["examples"].append("   # OpenGL rendering to virtual GPU")
+            results["examples"].append("")
+
+            results["test_commands"].append("Test GPU accessibility:")
+            results["test_commands"].append(f"  ls -la {render_dev}")
+            results["test_commands"].append("  ls -la /dev/dri/")
+            results["test_commands"].append(
+                "  pip install pyopencl && python -c \"import pyopencl; print('OpenCL:', len(cl.get_platforms()), 'platforms')\""
+            )
+
+            results["verification"].append("AI workloads with OpenCL:")
+            results["verification"].append("  import pyopencl as cl")
+            results["verification"].append("  import numpy as np")
+            results["verification"].append(
+                "  a = np.random.rand(1000000).astype(np.float32)"
+            )
+            results["verification"].append(
+                "  ctx = cl.Context(cl.get_platforms()[0].get_devices())"
+            )
+            results["verification"].append("  queue = cl.CommandQueue(ctx)")
+            results["verification"].append("  mf = cl.mem_flags")
+            results["verification"].append(
+                "  a_buf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=a)"
+            )
+            results["verification"].append("  # Kernel execution on GPU")
+
+        if npu_info["present"]:
+            results["examples"].append("NPU Usage Examples:")
+            results["examples"].append("")
+
+            for mm in npu_info.get("make_model", []):
+                if "Coral" in mm or "Edge TPU" in mm:
+                    results["examples"].append("Google Edge TPU:")
+                    results["examples"].append(
+                        "  from pycoral.utils.edgetpu import make_interpreter"
+                    )
+                    results["examples"].append(
+                        "  interpreter = make_interpreter('model.tflite')"
+                    )
+                    results["examples"].append("  interpreter.allocate_tensors()")
+                    results["examples"].append("  # Run inference on Edge TPU")
+                    results["examples"].append("")
+
+                elif "Ethos" in mm:
+                    results["examples"].append("Arm Ethos NPU:")
+                    results["examples"].append(
+                        "  import tflite_runtime.interpreter as tflite"
+                    )
+                    results["examples"].append(
+                        "  delegate = tflite.load_delegate('libethosu_delegate.so')"
+                    )
+                    results["examples"].append(
+                        "  interpreter = tflite.Interpreter('model.tflite', [delegate])"
+                    )
+                    results["examples"].append("  # Run inference on Ethos NPU")
+                    results["examples"].append("")
+
+        results["examples"].append(
+            "General AI Libraries (work with GPU/NPU when available):"
+        )
+        results["examples"].append("  import torch")
+        results["examples"].append(
+            "  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')"
+        )
+        results["examples"].append("  model = model.to(device)")
+        results["examples"].append("")
+        results["examples"].append("  import tensorflow as tf")
+        results["examples"].append(
+            "  print('GPU devices:', tf.config.list_physical_devices('GPU'))"
+        )
+        results["examples"].append("")
 
         return results
 
@@ -1634,6 +2059,43 @@ def format_for_students(detector: HardwareDetector) -> str:
         output.append("Graphics will use your main CPU")
     output.append("")
 
+    gpu_details = detector.detect_gpu_device_details()
+    if gpu_details["render_devices"] or gpu_details["dri_cards"]:
+        output.append("-" * 60)
+        output.append("GPU DEVICE DETAILS")
+        output.append("-" * 60)
+        if gpu_details["render_devices"]:
+            output.append(
+                f"Found {len(gpu_details['render_devices'])} render device(s):"
+            )
+            for dev in gpu_details["render_devices"][:3]:
+                caps = gpu_details["device_capabilities"].get(dev, {})
+                driver = caps.get("driver", "unknown")
+                pci_id = caps.get("pci_id", "")
+                output.append(f"  {dev}")
+                if driver:
+                    output.append(f"    Driver: {driver}")
+                if pci_id:
+                    output.append(f"    PCI ID: {pci_id}")
+            output.append("")
+            output.append("What this means:")
+            output.append("  - renderD128 is a GPU device for compute/rendering")
+            output.append("  - Can be used with OpenCL, Vulkan, OpenGL")
+            output.append("  - May be a virtualized GPU (virtio-gpu) if in VM")
+            output.append("")
+            if gpu_details["vulkan_available"]:
+                output.append(
+                    "  Vulkan support available - High-performance graphics API"
+                )
+            if gpu_details["opengl_version"]:
+                output.append(f"  OpenGL version: {gpu_details['opengl_version']}")
+            output.append("")
+        if gpu_details["dri_cards"]:
+            output.append(f"Found {len(gpu_details['dri_cards'])} display device(s):")
+            for dev in gpu_details["dri_cards"][:3]:
+                output.append(f"  {dev}")
+            output.append("")
+
     npu_info = detector.detect_npu()
     output.append("-" * 60)
     output.append("NEURAL PROCESSING UNIT (NPU) / AI CHIP")
@@ -1699,6 +2161,22 @@ def format_for_students(detector: HardwareDetector) -> str:
         output.append("Note: Install drivers first, then Python libraries!")
         output.append("")
 
+    usage_examples = detector.get_practical_usage_examples(
+        gpu_info, npu_info, gpu_details
+    )
+    if usage_examples["examples"]:
+        output.append("-" * 60)
+        output.append("PRACTICAL USAGE EXAMPLES")
+        output.append("-" * 60)
+        for ex in usage_examples["examples"][:30]:
+            output.append(ex)
+        output.append("")
+
+        if usage_examples["test_commands"]:
+            output.append("Quick test commands:")
+            for cmd in usage_examples["test_commands"][:5]:
+                output.append(cmd)
+            output.append("")
     opencl_info = detector.detect_opencl()
 
     opencl_info = detector.detect_opencl()
@@ -1905,6 +2383,96 @@ def format_for_students(detector: HardwareDetector) -> str:
                 output.append(f"  {detail}")
         output.append("")
 
+    virtio_info = detector.detect_virtio_components(virt_info["in_vm"])
+    if virtio_info["components"]:
+        output.append("-" * 60)
+        output.append("VIRTIO COMPONENTS (VM ACCELERATION)")
+        output.append("-" * 60)
+        output.append("This VM has Virtio components for better performance:")
+        output.append("")
+        for comp, desc in virtio_info["components"].items():
+            output.append(f"{comp}:")
+            output.append(f"  {desc}")
+        output.append("")
+        output.append("What this means:")
+        output.append("  - Virtio provides paravirtualized drivers for VMs")
+        output.append("  - Faster I/O than traditional emulated hardware")
+        output.append("  - Reduces CPU overhead in VM operations")
+        output.append("")
+        if "virtio-gpu" in virtio_info["components"]:
+            output.append("  virtio-gpu: Virtualized GPU (limited compute support)")
+            output.append("    - Use OpenCL for basic GPU acceleration")
+            output.append("    - Full CUDA/ROCm may not work in VM")
+            output.append("")
+        if "virtio-net" in virtio_info["components"]:
+            output.append("  virtio-net: Optimized network I/O")
+            output.append("    - High throughput, low latency networking")
+            output.append("")
+        if "virtio-blk" in virtio_info["components"]:
+            output.append("  virtio-blk: Optimized disk I/O")
+            output.append("    - Fast storage access in VM")
+            output.append("")
+
+    vfio_info = detector.detect_vfio()
+    if vfio_info["available"]:
+        output.append("-" * 60)
+        output.append("VFIO (VIRTUAL FUNCTION I/O)")
+        output.append("-" * 60)
+        output.append("VFIO is available for device passthrough to VMs")
+        output.append("")
+
+        if vfio_info["modules_loaded"]:
+            output.append("VFIO modules loaded:")
+            for mod in vfio_info["modules_loaded"]:
+                output.append(f"  - {mod}")
+            output.append("")
+
+        if vfio_info["iommu_groups"]:
+            output.append(f"IOMMU groups: {len(vfio_info['iommu_groups'])}")
+            for group_num in sorted(vfio_info["iommu_groups"][:5]):
+                devices = vfio_info["iommu_devices"].get(group_num, [])
+                output.append(f"  Group {group_num}: {', '.join(devices[:3])}")
+            output.append("")
+
+        if vfio_info["devices_bound_to_vfio"]:
+            output.append("Devices bound to VFIO (can be passed to VMs):")
+            for dev in vfio_info["devices_bound_to_vfio"][:5]:
+                output.append(f"  {dev}")
+            output.append("")
+
+        if vfio_info["vfio_devices"]:
+            output.append(f"VFIO device nodes: {len(vfio_info['vfio_devices'])}")
+            for dev in vfio_info["vfio_devices"][:3]:
+                output.append(f"  {dev}")
+            output.append("")
+
+        if vfio_info["mdev_devices"]:
+            output.append("Mediated devices (shared device assignment):")
+            for mdev in vfio_info["mdev_devices"][:3]:
+                output.append(f"  {mdev}")
+            output.append("")
+
+        if vfio_info["platform_devices"]:
+            output.append("VFIO platform devices:")
+            for plat in vfio_info["platform_devices"][:3]:
+                output.append(f"  {plat}")
+            output.append("")
+
+        output.append("What this means:")
+        output.append(
+            "  - PCI devices can be passed directly to VMs with near-native performance"
+        )
+        output.append("  - Devices bound to VFIO bypass host kernel drivers")
+        output.append("  - Requires IOMMU for secure device assignment")
+        output.append("  - Use for GPU, NIC, storage passthrough to VMs")
+        output.append("")
+
+        if vfio_info["details"]:
+            output.append("Additional details:")
+            for detail in vfio_info["details"][:5]:
+                output.append(f"  {detail}")
+        output.append("")
+
     output.append("=" * 60)
     output.append("SUMMARY")
     output.append("=" * 60)
@@ -1946,6 +2514,8 @@ def format_for_students(detector: HardwareDetector) -> str:
         accelerators.append("SR-IOV")
     if virt_info["sev"] or virt_info["sev_es"]:
         accelerators.append("Encrypted Virtualization (SEV)")
+    if vfio_info["available"]:
+        accelerators.append("VFIO (Device Passthrough)")
 
     if accelerators:
         output.append("Your system has these acceleration features:")
