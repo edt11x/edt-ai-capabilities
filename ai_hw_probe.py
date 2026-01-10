@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -51,7 +52,22 @@ class HardwareDetector:
         info: Dict[str, str] = {}
         cpuinfo = self._read_file("/proc/cpuinfo")
         if cpuinfo:
+            threads = 0
+            cores = 0
+            sockets = 0
             for line in cpuinfo.split("\n"):
+                if line.startswith("processor"):
+                    threads += 1
+                elif line.startswith("cpu cores"):
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        cores = int(parts[1].strip())
+                elif line.startswith("physical id"):
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        socket_id = int(parts[1].strip())
+                        if socket_id + 1 > sockets:
+                            sockets = socket_id + 1
                 for key in [
                     "Hardware",
                     "Model",
@@ -66,6 +82,13 @@ class HardwareDetector:
                         parts = line.split(":", 1)
                         if len(parts) == 2:
                             info[key] = parts[1].strip()
+
+            if threads > 0:
+                info["threads"] = str(threads)
+            if cores > 0:
+                if sockets > 1:
+                    cores *= sockets
+                info["cores"] = str(cores)
 
         compatible = self._read_file("/proc/device-tree/compatible")
         if compatible:
@@ -372,6 +395,60 @@ class HardwareDetector:
                 results["details"].append(f"Used: {results['used_gb']:.2f} GB")
                 if results["swap_gb"] > 0:
                     results["details"].append(f"Swap: {results['swap_gb']:.2f} GB")
+
+        return results
+
+    def detect_disk(self) -> Dict[str, Any]:
+        results: Dict[str, Any] = {
+            "total_gb": 0,
+            "available_gb": 0,
+            "used_gb": 0,
+            "swap_partitions": [],
+            "details": [],
+        }
+
+        # Get disk usage for the partition where this script is running
+        script_path = os.path.abspath(__file__)
+        script_dir = os.path.dirname(script_path)
+        try:
+            usage = shutil.disk_usage(script_dir)
+            results["total_gb"] = usage.total / (1024**3)
+            results["available_gb"] = usage.free / (1024**3)
+            results["used_gb"] = usage.used / (1024**3)
+        except Exception:
+            pass
+
+        # Check for swap partitions
+        try:
+            with open("/proc/swaps", "r") as f:
+                lines = f.readlines()
+                for line in lines[1:]:  # Skip header
+                    parts = line.split()
+                    if len(parts) >= 5 and parts[0] != "Filename":
+                        size_kb = int(parts[2])
+                        if size_kb > 0:
+                            results["swap_partitions"].append(
+                                {
+                                    "device": parts[0],
+                                    "type": parts[1],
+                                    "size_gb": size_kb / (1024 * 1024),
+                                }
+                            )
+        except Exception:
+            pass
+
+        if results["total_gb"] > 0:
+            results["details"].append(f"Total Disk Space: {results['total_gb']:.2f} GB")
+            results["details"].append(
+                f"Available Space: {results['available_gb']:.2f} GB"
+            )
+            results["details"].append(f"Used Space: {results['used_gb']:.2f} GB")
+
+        if results["swap_partitions"]:
+            total_swap = sum(p["size_gb"] for p in results["swap_partitions"])
+            results["details"].append(
+                f"Swap Partitions: {len(results['swap_partitions'])} ({total_swap:.2f} GB total)"
+            )
 
         return results
 
@@ -2179,6 +2256,24 @@ def format_for_students(detector: HardwareDetector) -> str:
             output.append("  - Accessing swap is slower than RAM")
 
         output.append("")
+
+    disk_info = detector.detect_disk()
+    output.append("-" * 60)
+    output.append("DISK")
+    output.append("-" * 60)
+    if disk_info["total_gb"] > 0:
+        output.append(f"Total Disk Space: {disk_info['total_gb']:.2f} GB")
+        output.append(f"Available Space: {disk_info['available_gb']:.2f} GB")
+        output.append(f"Used Space: {disk_info['used_gb']:.2f} GB")
+        if disk_info["swap_partitions"]:
+            total_swap = sum(p["size_gb"] for p in disk_info["swap_partitions"])
+            output.append(
+                f"Swap partitions available: {len(disk_info['swap_partitions'])} ({total_swap:.2f} GB total)"
+            )
+        output.append("")
+    else:
+        output.append("Could not detect disk information")
+    output.append("")
 
     gpu_info = detector.detect_gpu()
     output.append("-" * 60)
